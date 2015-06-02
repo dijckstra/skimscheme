@@ -122,7 +122,10 @@ environment =
           $ insert "list?"          (Native predList)
           $ insert "+"              (Native numericSum) 
           $ insert "*"              (Native numericMult) 
-          $ insert "-"              (Native numericSub) 
+          $ insert "-"              (Native numericSub)
+          $ insert "/"              (Native numericDiv)
+          $ insert "%"              (Native numericMod)
+          $ insert "<"              (Native numBoolLessThan)
           $ insert "car"            (Native car)           
           $ insert "cdr"            (Native cdr)           
             empty
@@ -194,22 +197,48 @@ numericSub [x] = if onlyNumbers [x]
                  else Error "not a number."
 numericSub l = numericBinOp (-) l
 
--- We have not implemented division. Also, notice that we have not 
--- addressed floating-point numbers.
+numericDiv :: [LispVal] -> LispVal
+numericDiv [] = Error "wrong number of arguments."
+numericDiv [x] = Number (div 1 (unpackNum x))
+numericDiv l =  if hasZeroes l
+                then Error "division by zero."
+                else numericBinOp (div) l
+
+numericMod :: [LispVal] -> LispVal
+numericMod [] = Error "wrong number of arguments."
+numericMod [x] = Error "wrong number of arguments."
+numericMod l = if hasZeroes l then Error "division by zero."
+                  else numericBinOp (mod) l
+
+numBoolLessThan :: [LispVal] -> LispVal
+numBoolLessThan l = if onlyNumbers l
+                    then lessThan l
+                    else Error "not a number."
 
 numericBinOp :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
 numericBinOp op args = if onlyNumbers args 
                        then Number $ foldl1 op $ Prelude.map unpackNum args 
                        else Error "not a number."
+
+lessThan :: [LispVal] -> LispVal
+lessThan (Number a:Number b:[]) = Bool (a < b)
+lessThan (Number a:Number b:ls) = Error "too many arguments."
+lessThan _ = Error "too few arguments."
                        
 onlyNumbers :: [LispVal] -> Bool
 onlyNumbers [] = True
 onlyNumbers (Number n:ns) = onlyNumbers ns
-onlyNumbers ns = False             
+onlyNumbers ns = False
+
+hasZeroes :: [LispVal] -> Bool
+hasZeroes [] = False
+hasZeroes (Number n:ns) = (n == 0) || (hasZeroes ns)    
                        
 unpackNum :: LispVal -> Integer
 unpackNum (Number n) = n
---- unpackNum a = ... -- Should never happen!!!!
+
+unpackBool :: LispVal -> Bool
+unpackBool (Bool n) = n
 
 -----------------------------------------------------------
 --                     main FUNCTION                     --
