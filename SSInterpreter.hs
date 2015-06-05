@@ -46,8 +46,25 @@ eval env val@(Number _) = return val
 eval env val@(Bool _) = return val
 eval env (List [Atom "quote", val]) = return val
 eval env (List (Atom "begin":[v])) = eval env v
-eval env (List (Atom "begin": l: ls)) = (eval env l) >>= (\v -> case v of { (error@(Error _)) -> return error; otherwise -> eval env (List (Atom "begin": ls))})
+eval env (List (Atom "begin":l:ls)) = (eval env l) >>= (\v -> case v of { (error@(Error _)) -> return error; otherwise -> eval env (List (Atom "begin": ls))})
 eval env (List (Atom "begin":[])) = return (List [])
+eval env (List (Atom "comment":[])) = return (List [])
+eval env (List (Atom "if":test:conseq:alt:[])) =
+ (eval env test) >>= (\v -> case v of
+  (error@(Error _)) -> return error
+  (Bool False) -> eval env alt
+  otherwise -> eval env conseq
+  )
+eval env (List (Atom "if":test:conseq:[])) =
+ (eval env test) >>= (\v -> case v of
+  (error@(Error _)) -> return error
+  (Bool False) -> return (List [])
+  otherwise -> eval env conseq
+  )
+eval env (List (Atom "set!":(Atom var):form:[])) = 
+  (stateLookup env var) >>= (\v -> case v of
+    (error@(Error _)) -> return error
+    otherwise -> defineVar env var form)
 eval env lam@(List (Atom "lambda":(List formals):body:[])) = return lam
 -- The following line is slightly more complex because we are addressing the
 -- case where define is redefined by the user (whatever is the user's reason
@@ -55,20 +72,22 @@ eval env lam@(List (Atom "lambda":(List formals):body:[])) = return lam
 -- the same semantics as redefining other functions, since define is not
 -- stored as a regular function because of its return type.
 eval env (List (Atom "define": args)) = maybe (define env args) (\v -> return v) (Map.lookup "define" env)
-eval env (List (Atom func : args)) = mapM (eval env) args >>= apply env func 
+eval env (List (Atom func : args)) = mapM (eval env) args >>= apply env func
 eval env (Error s)  = return (Error s)
 eval env form = return (Error ("Could not eval the special form: " ++ (show form)))
 
 stateLookup :: StateT -> String -> StateTransformer LispVal
 stateLookup env var = ST $ 
   (\s -> 
-    (maybe (Error "variable does not exist.") 
-           id (Map.lookup var (union s env) 
+    (maybe (Error "variable does not exist.")
+      -- This needed to be switched because union joins the first environment into the second,
+      -- which meant global variables from env would come first, then the local ones.
+      -- The lookup would then find the global variable first and use it.
+           id (Map.lookup var (union env s)
     ), s))
 
-
 -- Because of monad complications, define is a separate function that is not
--- included in the state of the program. This saves  us from having to make
+-- included in the state of the program. This saves us from having to make
 -- every predefined function return a StateTransformer, which would also
 -- complicate state management. The same principle applies to set!. We are still
 -- not talking about local definitions. That's a completely different
@@ -76,10 +95,13 @@ stateLookup env var = ST $
 define :: StateT -> [LispVal] -> StateTransformer LispVal
 define env [(Atom id), val] = defineVar env id val
 define env [(List [Atom id]), val] = defineVar env id val
--- define env [(List l), val]                                       
+-- This creates lambdas from function definitions.
+define env ((List (Atom id:args)):body:[]) = defineVar env id (List [Atom "lambda", (List args), body])
+-- define env [(List l), val]
 define env args = return (Error "wrong number of arguments")
+
 defineVar env id val = 
-  ST (\s -> let (ST f)    = eval env val
+  ST (\s -> let (ST f) = eval env val
                 (result, newState) = f s
             in (result, (insert id result newState))
      )
@@ -109,7 +131,6 @@ lambda env formals body args =
   let dynEnv = Prelude.foldr (\(Atom f, a) m -> Map.insert f a m) env (zip formals args)
   in  eval dynEnv body
 
-
 -- Initial environment of the programs. Maps identifiers to values. 
 -- Initially, maps function names to function values, but there's 
 -- nothing stopping it from storing general values (e.g., well-known
@@ -121,13 +142,15 @@ environment =
           $ insert "boolean?"       (Native predBoolean)
           $ insert "list?"          (Native predList)
           $ insert "+"              (Native numericSum) 
-          $ insert "*"              (Native numericMult) 
+          $ insert "*"              (Native numericMult)
           $ insert "-"              (Native numericSub)
+          $ insert "cons"           (Native cons)
+          $ insert "lt?"            (Native numBoolLessThan)
           $ insert "/"              (Native numericDiv)
           $ insert "%"              (Native numericMod)
-          $ insert "<"              (Native numBoolLessThan)
-          $ insert "car"            (Native car)           
-          $ insert "cdr"            (Native cdr)           
+          $ insert "eqv?"           (Native eqv)
+          $ insert "car"            (Native car)
+          $ insert "cdr"            (Native cdr)
             empty
 
 type StateT = Map String LispVal
@@ -197,6 +220,16 @@ numericSub [x] = if onlyNumbers [x]
                  else Error "not a number."
 numericSub l = numericBinOp (-) l
 
+cons :: [LispVal] -> LispVal
+cons (a:(List as):[]) =  List (a:as)
+cons (a:(DottedList as v):[]) = DottedList (a:as) v
+cons _ = Error "invalid list."
+
+numBoolLessThan :: [LispVal] -> LispVal
+numBoolLessThan l = if onlyNumbers l
+                    then lessThan l
+                    else Error "not a number."
+
 numericDiv :: [LispVal] -> LispVal
 numericDiv [] = Error "wrong number of arguments."
 numericDiv [x] = Number (div 1 (unpackNum x))
@@ -210,10 +243,17 @@ numericMod [x] = Error "wrong number of arguments."
 numericMod l = if hasZeroes l then Error "division by zero."
                   else numericBinOp (mod) l
 
-numBoolLessThan :: [LispVal] -> LispVal
-numBoolLessThan l = if onlyNumbers l
-                    then lessThan l
-                    else Error "not a number."
+eqv :: [LispVal] -> LispVal
+eqv ((Atom a):(Atom b):[]) = Bool (a == b)
+eqv ((List []):(List []):[]) = Bool True
+eqv ((List (a:as)):(List (b:bs)):[]) = Bool (unpackBool (eqv [a, b]) && unpackBool (eqv [(List as), (List bs)]))
+-- DottedList = (List LispVal) LispVal
+eqv ((DottedList a as):(DottedList b bs):[]) = Bool (unpackBool (eqv [(List a), (List b)]) && unpackBool (eqv [as, bs]))
+eqv ((Number a):(Number b):[]) = Bool (a == b)
+eqv ((String a):(String b):[]) = Bool (a == b)
+eqv ((Bool a):(Bool b):[]) = Bool (a == b)
+eqv ((_):(_):[]) = Bool False
+eqv _ = Error "too few arguments." 
 
 numericBinOp :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
 numericBinOp op args = if onlyNumbers args 
