@@ -46,9 +46,8 @@ eval env val@(Number _) = return val
 eval env val@(Bool _) = return val
 eval env (List [Atom "quote", val]) = return val
 eval env (List (Atom "begin":[v])) = eval env v
-eval env (List (Atom "begin":l:ls)) = (eval env l) >>= (\v -> case v of { (error@(Error _)) -> return error; otherwise -> eval env (List (Atom "begin": ls))})
+eval env (List (Atom "begin": l: ls)) = (eval env l) >>= (\v -> case v of { (error@(Error _)) -> return error; otherwise -> eval env (List (Atom "begin": ls))})
 eval env (List (Atom "begin":[])) = return (List [])
-eval env (List (Atom "comment":[])) = return (List [])
 eval env (List (Atom "if":test:conseq:alt:[])) =
  (eval env test) >>= (\v -> case v of
   (error@(Error _)) -> return error
@@ -65,6 +64,16 @@ eval env (List (Atom "set!":(Atom var):form:[])) =
   (stateLookup env var) >>= (\v -> case v of
     (error@(Error _)) -> return error
     otherwise -> defineVar env var form)
+
+eval env (List (Atom "let":(List args):expr:[])) = ST $
+  (\st -> 
+    let curr = union env st -- Saves the env environment into the input environment
+        extended = addLet curr env args -- Adds the let definitions from curr into env
+        (ST f) = eval extended expr -- Evaluates the let expression
+        (result, newState) = f st -- Applies the state transformer to the input environment
+        afterState = union (difference newState extended) curr -- Removes the let definitions from the transformed state, and saves it to the curr environment
+    in (result, afterState)
+    )
 eval env lam@(List (Atom "lambda":(List formals):body:[])) = return lam
 -- The following line is slightly more complex because we are addressing the
 -- case where define is redefined by the user (whatever is the user's reason
@@ -106,7 +115,6 @@ defineVar env id val =
             in (result, (insert id result newState))
      )
 
-
 -- The maybe function yields a value of type b if the evaluation of 
 -- its third argument yields Nothing. In case it yields Just x, maybe
 -- applies its second argument f to x and yields (f x) as its result.
@@ -118,7 +126,7 @@ apply env func args =
                       otherwise -> 
                         (stateLookup env func >>= \res -> 
                           case res of 
-                            List (Atom "lambda" : List formals : body:l) -> lambda env formals body args                              
+                            List (Atom "lambda" : List formals : body : l) -> lambda env formals body args
                             otherwise -> return (Error $ func ++ " not a function.")
                         )
  
@@ -130,6 +138,13 @@ lambda :: StateT -> [LispVal] -> LispVal -> [LispVal] -> StateTransformer LispVa
 lambda env formals body args = 
   let dynEnv = Prelude.foldr (\(Atom f, a) m -> Map.insert f a m) env (zip formals args)
   in  eval dynEnv body
+
+addLet :: StateT -> StateT -> [LispVal] -> StateT
+addLet curr env ((List ((Atom id):val:[]):[])) = insert id (unpackVal (eval curr val) curr) env
+addLet curr env ((List ((Atom id):val:[]):ls)) = addLet curr (insert id (unpackVal (eval curr val) curr) env) ls
+
+unpackVal :: StateTransformer LispVal -> StateT -> LispVal
+unpackVal (ST f) env = fst (f env)
 
 -- Initial environment of the programs. Maps identifiers to values. 
 -- Initially, maps function names to function values, but there's 
@@ -151,6 +166,7 @@ environment =
           $ insert "eqv?"           (Native eqv)
           $ insert "car"            (Native car)
           $ insert "cdr"            (Native cdr)
+          $ insert "comment"        (Native comment)
             empty
 
 type StateT = Map String LispVal
@@ -176,7 +192,10 @@ instance Monad StateTransformer where
 
 -- Includes some auxiliary functions. Does not include functions that modify
 -- state. These functions, such as define and set!, must run within the
--- StateTransformer monad. 
+-- StateTransformer monad.
+
+comment :: [LispVal] -> LispVal
+comment _ = List []
 
 car :: [LispVal] -> LispVal
 car [List (a:as)] = a
@@ -293,4 +312,3 @@ getResult (ST f) = f empty -- we start with an empty state.
 main :: IO ()
 main = do args <- getArgs
           putStr $ showResult $ getResult $ eval environment $ readExpr $ concat $ args 
-          
